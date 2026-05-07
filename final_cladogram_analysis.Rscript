@@ -1,0 +1,308 @@
+# ════════════════════════════════════════════════════════════════
+# LIBRARIES
+library(ape)
+library(phangorn)
+library(ggdendro)
+library(RColorBrewer)
+library(gridExtra)
+library(cowplot)
+library(grid)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(magrittr)
+library(tibble)
+library(tidyr)
+library(purrr)
+library(stringr)
+library(openxlsx)
+
+# ════════════════════════════════════════════════════════════════
+input_dir <- "/home/aditri04/lu2025-17-24/BIMB60/TCGA/methylation_betas"
+# ════════════════════════════════════════════════════════════════
+# READ FUNCTION 
+read_beta <- function(file, sample_name) {
+  read_tsv(file, col_names = c("cpg_id", "beta", "chr", "start", "end"),
+           col_types = "cncii") %>%
+    mutate(sample = sample_name)
+}
+# ════════════════════════════════════════════════════════════════
+# MAIN PIPELINE 
+run_cladogram <- function(sample, k = 4) {
+
+  tumor_file  <- file.path(input_dir, paste0(sample, "_T.tsv"))
+  normal_file <- file.path(input_dir, paste0(sample, "_N.tsv"))
+
+  if (!file.exists(normal_file) || !file.exists(tumor_file)) return(NULL)
+
+  tumor  <- read_beta(tumor_file, "tumor")
+  normal <- read_beta(normal_file, "normal")
+
+  betas <- inner_join(normal, tumor,
+                      by = c("cpg_id", "chr", "start", "end"),
+                      suffix = c("_normal", "_tumor")) %>%
+    filter(!is.na(beta_normal), !is.na(beta_tumor))
+
+  window_size <- 5e6
+
+  windows <- betas %>%
+    mutate(window = paste0(chr, ":", floor(start / window_size) * window_size)) %>%
+    group_by(window, chr) %>%
+    summarise(
+      normal_beta = mean(beta_normal),
+      tumor_beta  = mean(beta_tumor),
+      n_cpg       = n(),
+      .groups     = "drop"
+    ) %>%
+    filter(n_cpg >= 20) %>%
+    mutate(delta_beta = tumor_beta - normal_beta)
+
+  # TREE + CLUSTERING 
+  mat <- windows %>%
+    select(window, normal_beta, tumor_beta) %>%
+    column_to_rownames("window") %>%
+    as.matrix()
+
+  hc <- as.hclust(upgma(dist(mat)))
+
+  cluster_ids <- cutree(hc, k = k)
+  windows$subclone <- LETTERS[cluster_ids]
+
+  trunk_cluster <- windows %>%
+    group_by(subclone) %>%
+    summarise(var_db = var(delta_beta), .groups = "drop") %>%
+    slice_min(var_db) %>%
+    pull(subclone)
+
+  windows <- windows %>%
+    mutate(clonal_type = if_else(subclone == trunk_cluster, "trunk", "private"))
+
+  # METHYLATION STATE 
+  db_sd <- sd(windows$delta_beta)
+
+  windows <- windows %>%
+    mutate(
+      state = case_when(
+        delta_beta >  db_sd ~ "hyper",
+        delta_beta < -db_sd ~ "hypo",
+        TRUE ~ NA_character_
+      )
+    ) %>%
+    filter(!is.na(state)) %>%
+    mutate(sample = sample)
+
+  return(windows)  
+}
+
+# ════════════════════════════════════════════════════════════════
+# RUN PIPELINE 
+
+tumor_files <- list.files(input_dir, pattern = "_T\\.tsv$")
+sample_ids <- sub("_T\\.tsv$", "", tumor_files)
+
+all_data <- purrr::map_dfr(sample_ids, run_cladogram)
+
+# ════════════════════════════════════════════════════════════════
+# ADD CANCER TYPE
+
+all_data$cancer <- stringr::str_extract(all_data$sample, "^[A-Z]+")
+
+# ════════════════════════════════════════════════════════════════
+# AGGREGATION 
+
+plot_data <- all_data %>%
+  group_by(cancer, sample, chr, clonal_type, state) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(cancer, chr, clonal_type, state) %>%
+  summarise(mean_events = mean(n), .groups = "drop")
+
+# ════════════════════════════════════════════════════════════════
+# PROPORTIONS 
+
+plot_data <- plot_data %>%
+  group_by(cancer) %>%
+  mutate(
+    total_events = sum(mean_events),
+    proportion   = mean_events / total_events
+  ) %>%
+  ungroup()
+
+# ════════════════════════════════════════════════════════════════
+# SIGNED VALUES (HYPER UP, HYPO DOWN)
+
+plot_data$value_abs <- if_else(plot_data$state == "hyper",
+                              plot_data$mean_events,
+                              -plot_data$mean_events)
+
+plot_data$value_prop <- if_else(plot_data$state == "hyper",
+                               plot_data$proportion,
+                               -plot_data$proportion)
+
+# ════════════════════════════════════════════════════════════════
+# CLEAN CHROMOSOME LABELS 
+
+plot_data$chr <- factor(plot_data$chr,
+                        levels = paste0("chr", c(1:22, "X", "Y")))
+
+plot_data$chr_label <- gsub("chr", "", plot_data$chr)
+
+plot_data$chr_label <- factor(
+  plot_data$chr_label,
+  levels = c(as.character(1:22), "X", "Y")
+)
+
+# ════════════════════════════════════════════════════════════════
+# COLORS 
+
+cols <- c(
+  trunk   = "#F8766D",
+  private = "#619CFF"
+)
+
+# ════════════════════════════════════════════════════════════════
+# ABSOLUTE PLOT
+
+p_abs <- ggplot(plot_data,
+                aes(x = chr_label, y = value_abs, fill = clonal_type)) +
+  geom_col(width = 0.85) +
+  facet_wrap(~ cancer, ncol = 4) +
+  scale_fill_manual(values = cols) +
+  geom_hline(yintercept = 0, color = "black", linewidth = 0.5) +
+  labs(
+    title = "Chromosomal distribution of trunk and private methylation events",
+    x = "Chromosome",
+    y = "Average number of methylation events (↑ hyper, ↓ hypo)"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
+    strip.text  = element_text(face = "bold", size = 10),
+    legend.title = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+# ════════════════════════════════════════════════════════════════
+# PROPORTION PLOT
+
+p_prop <- ggplot(plot_data,
+                 aes(x = chr_label, y = value_prop, fill = clonal_type)) +
+  geom_col(width = 0.85) +
+  facet_wrap(~ cancer, ncol = 4) +
+  scale_fill_manual(values = cols) +
+  geom_hline(yintercept = 0, color = "black", linewidth = 0.5) +
+  labs(
+    title = "Relative chromosomal distribution of trunk and private methylation events",
+    x = "Chromosome",
+    y = "Proportion of methylation events (↑ hyper, ↓ hypo)"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
+    strip.text  = element_text(face = "bold", size = 10),
+    legend.title = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+# ════════════════════════════════════════════════════════════════
+# SAVE (PNG + PDF)
+
+ggsave("methylation_absolute.png", p_abs, width = 18, height = 10, dpi = 300)
+ggsave("methylation_absolute.pdf", p_abs, width = 18, height = 10)
+
+ggsave("methylation_proportion.png", p_prop, width = 18, height = 10, dpi = 300)
+ggsave("methylation_proportion.pdf", p_prop, width = 18, height = 10)
+
+# ════════════════════════════════════════════════════════════════
+# EXPORT MULTI-SHEET EXCEL (SUPERVISOR-FRIENDLY, CONSISTENT COLORS)
+
+# ---- 1. CLEAN EVENT TABLE (LONG FORMAT)
+events_sheet <- all_data %>%
+  mutate(chr_label = gsub("chr", "", chr)) %>%
+  select(
+    cancer,
+    sample,
+    chr_label,
+    window,
+    delta_beta,
+    subclone,
+    clonal_type,
+    state
+  ) %>%
+  arrange(cancer, sample, chr_label)
+
+# ---- 2. CHROMOSOME SUMMARY
+chr_summary <- events_sheet %>%
+  group_by(cancer, chr_label, clonal_type, state) %>%
+  summarise(n_events = n(), .groups = "drop")
+
+# ---- 3. SUBCLONE SUMMARY
+subclone_summary <- events_sheet %>%
+  group_by(cancer, sample, subclone, clonal_type) %>%
+  summarise(n_events = n(), .groups = "drop")
+
+# ---- 4. SAMPLE SUMMARY
+sample_summary <- events_sheet %>%
+  group_by(cancer, sample, clonal_type, state) %>%
+  summarise(n_events = n(), .groups = "drop")
+
+# ---- CREATE WORKBOOK
+wb <- createWorkbook()
+
+# ========================
+# EVENTS SHEET
+# ========================
+addWorksheet(wb, "events")
+writeData(wb, "events", events_sheet, withFilter = TRUE)
+
+# Header style
+headerStyle <- createStyle(textDecoration = "bold", fgFill = "#D9D9D9")
+addStyle(wb, "events", header_style,
+         rows = 1, cols = 1:ncol(events_sheet), gridExpand = TRUE)
+
+# Auto column width
+setColWidths(wb, "events", cols = 1:ncol(events_sheet), widths = "auto")
+
+# ---- COLOR BY CLONAL TYPE (MATCHES YOUR PLOT)
+clonal_col <- which(names(events_sheet) == "clonal_type")
+
+# trunk = light red
+conditionalFormatting(
+  wb, "events",
+  cols = clonal_col,
+  rows = 2:(nrow(events_sheet) + 1),
+  rule = '=="trunk"',
+  style = createStyle(bgFill = "#FEE0D2")
+)
+
+# private = light blue
+conditionalFormatting(
+  wb, "events",
+  cols = clonal_col,
+  rows = 2:(nrow(events_sheet) + 1),
+  rule = '=="private"',
+  style = createStyle(bgFill = "#DEEBF7")
+)
+
+# ========================
+# OTHER SHEETS (clean + filters)
+# ========================
+addWorksheet(wb, "chromosome_summary")
+writeData(wb, "chromosome_summary", chr_summary, withFilter = TRUE)
+setColWidths(wb, "chromosome_summary", cols = 1:ncol(chr_summary), widths = "auto")
+
+addWorksheet(wb, "subclone_summary")
+writeData(wb, "subclone_summary", subclone_summary, withFilter = TRUE)
+setColWidths(wb, "subclone_summary", cols = 1:ncol(subclone_summary), widths = "auto")
+
+addWorksheet(wb, "sample_summary")
+writeData(wb, "sample_summary", sample_summary, withFilter = TRUE)
+setColWidths(wb, "sample_summary", cols = 1:ncol(sample_summary), widths = "auto")
+
+# ---- SAVE FILE
+saveWorkbook(wb, "methylation_events.xlsx", overwrite = TRUE)
+
+cat("Excel file saved: methylation_events.xlsx\n")
+
+cat("DONE — FINAL PIPELINE + PLOTS COMPLETE\n")

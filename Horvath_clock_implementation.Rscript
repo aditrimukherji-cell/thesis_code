@@ -1,0 +1,77 @@
+#Testing DNAmAge on sample methylation dataset
+#fast import of methylation data file
+library(data.table)
+# Load coefficients
+COEF_DIR <- "/home/aditri04/dnamage_tools/methylclock/data" #define coef folder
+COEF_DIR <- "/home/aditri04/dnamage_tools/methylclock/data" #list all the .rda files
+# Loop through each .rda file and load it into R
+rda_files <- list.files(COEF_DIR, pattern="\\.rda$", full.names=TRUE)
+for (f in rda_files) load(f)
+# Loads DNAmAGE and helper functions
+R_DIR <- "/home/aditri04/dnamage_tools/methylclock/R"
+r_files <- list.files(R_DIR, pattern="\\.R$", full.names=TRUE)
+for (f in r_files) source(f)
+#load example dataset - MethylationDataExample55
+load("/home/aditri04/dnamage_tools/methylclock/data/MethylationDataExample55.rda")
+example_result <- DNAmAge(
+  MethylationDataExample55,
+  clocks = "Horvath", #select clock
+  cell.count = FALSE, #turns off blood cell composition estimate and calculates age directly
+  fastImp = TRUE #fills in missing CpGs so the function doesn't crash
+)
+
+head(example_result)
+# A tibble: 6 × 2
+#  id        Horvath
+#  <chr>       <dbl>
+#1 GSM946048    51.8
+#2 GSM946049    39.8
+#3 GSM946052    26.4
+#4 GSM946054    34.0
+#5 GSM946055    10.1
+#6 GSM946056    20.4
+
+#Testing DNAmAge on TCGA dataset
+# Path to folder containing methylation beta files
+BETA_DIR <- "/home/aditri04/BIMB60/TCGA/methylation_betas"
+# List all normal sample files (ending in _N.tsv)
+normal_files <- list.files(BETA_DIR, pattern="_N\\.tsv$", full.names=TRUE)
+# List all tumour sample files (ending in _T.tsv)
+tumour_files <- list.files(BETA_DIR, pattern="_T\\.tsv$", full.names=TRUE)
+test_files <- c(normal_files[1], tumour_files[1])
+# Read first methylation file
+first_dt <- fread(test_files[1])
+setnames(first_dt, c("CpG", "beta", "chr", "start", "end"))
+# Initialize beta matrix with CpG IDs and beta values only
+beta_matrix <- first_dt[, .(CpG, beta)]
+setnames(beta_matrix, c("CpG", basename(test_files[1])))
+# Loop through remaining samples and merge
+for (f in test_files[-1]) {
+
+  dt <- fread(f)
+  setnames(dt, c("CpG", "beta", "chr", "start", "end")) #ensure all files have the same structure
+  
+  dt <- dt[, .(CpG, beta)]
+  setnames(dt, c("CpG", basename(f))) #keep only necessary information and rename column name to sample name
+  
+  beta_matrix <- merge(beta_matrix, dt, by="CpG", all=TRUE) #merge samples 
+
+}
+
+# Convert to data.frame for compatibility with DNAmAGE
+beta_input <- as.data.frame(beta_matrix)
+
+#Select Horvath CpGs
+horvath_cpgs <- coefHorvath$CpGmarker #Extract Cpgs used in Horvath's clock
+horvath_cpgs <- horvath_cpgs[horvath_cpgs != "(Intercept)"] #Remove the intercept because it is not a CpG probe
+beta_small <- beta_input[beta_input$CpG %in% horvath_cpgs, ] #Keep only the CpGs required for the Horvath's clock
+#Remove missing CpGs
+beta_small <- beta_small[complete.cases(beta_small), ]
+# Run clock
+test_result <- DNAmAge(
+  beta_small,
+  clocks = "Horvath",
+  cell.count = FALSE,
+  fastImp = TRUE
+)
+ head(test_result)
