@@ -139,7 +139,7 @@ plot_data$value_prop <- if_else(plot_data$state == "hyper",
                                -plot_data$proportion)
 
 # ════════════════════════════════════════════════════════════════
-# CLEAN CHROMOSOME LABELS 
+# CHROMOSOME LABELS 
 
 plot_data$chr <- factor(plot_data$chr,
                         levels = paste0("chr", c(1:22, "X", "Y")))
@@ -152,7 +152,7 @@ plot_data$chr_label <- factor(
 )
 
 # ════════════════════════════════════════════════════════════════
-# COLORS 
+# COLORING
 
 cols <- c(
   trunk   = "#F8766D",
@@ -206,7 +206,7 @@ p_prop <- ggplot(plot_data,
   )
 
 # ════════════════════════════════════════════════════════════════
-# SAVE (PNG + PDF)
+# SAVE 
 
 ggsave("methylation_absolute.png", p_abs, width = 18, height = 10, dpi = 300)
 ggsave("methylation_absolute.pdf", p_abs, width = 18, height = 10)
@@ -215,7 +215,7 @@ ggsave("methylation_proportion.png", p_prop, width = 18, height = 10, dpi = 300)
 ggsave("methylation_proportion.pdf", p_prop, width = 18, height = 10)
 
 # ════════════════════════════════════════════════════════════════
-# EXPORT MULTI-SHEET EXCEL (SUPERVISOR-FRIENDLY, CONSISTENT COLORS)
+# EXPORT VALUES TO EXCEL
 
 # ---- 1. CLEAN EVENT TABLE (LONG FORMAT)
 events_sheet <- all_data %>%
@@ -286,7 +286,7 @@ conditionalFormatting(
 )
 
 # ========================
-# OTHER SHEETS (clean + filters)
+# OTHER SHEETS 
 # ========================
 addWorksheet(wb, "chromosome_summary")
 writeData(wb, "chromosome_summary", chr_summary, withFilter = TRUE)
