@@ -1,5 +1,4 @@
 #Testing DNAmAge on sample methylation dataset
-#fast import of methylation data file
 library(data.table)
 # Load coefficients
 COEF_DIR <- "/home/aditri04/dnamage_tools/methylclock/data" #define coef folder
